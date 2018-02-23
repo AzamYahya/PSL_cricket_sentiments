@@ -1,0 +1,202 @@
+library(twitteR)
+library(sentiment)
+library(plyr)
+library(ggplot2)
+library(wordcloud)
+library(RColorBrewer)
+library(httr)
+library(ROAuth)
+setwd("Z:/Ferguson 13 march/other assignment/DS/PSL Sentiment")
+
+oauth_endpoints("twitter")
+
+api_key <- "*************"
+api_secret <- "*************************"
+access_token <- "****************************"
+access_token_secret <- "*********************************"
+setup_twitter_oauth(api_key,api_secret,access_token,access_token_secret)
+
+#PTI
+kword1 = searchTwitter("#PSL",n=5000)
+#convert to data frame
+kword1 <- twListToDF(kword1)
+#get only text
+kword1 <- kword1$text
+kword2 <- searchTwitter("#HBLPSL",n=5000)
+kword2 <- twListToDF(kword2)
+#get only text
+kword2 <- kword2$text
+#remove duplicate tweets
+kword2 <- kword2[!kword2 %in% kword1]
+kword3 <- searchTwitter("#PSL2017",n=5000)
+kword3 <- twListToDF(kword3)
+#get only text
+kword3 <- kword3$text
+#remove duplicate tweets
+
+kword3 <- kword3[!kword3 %in% kword1]
+kword3 <- kword3[!kword3 %in% kword2]
+
+
+kword4 <- searchTwitter("PSLt20",n=150)
+kword4 <- twListToDF(kword4)
+#get only text
+kword4 <- kword4$text
+#remove duplicate tweets
+kword4 <- kword4[!kword4 %in% kword1]
+kword4 <- kword4[!kword4 %in% kword2]
+kword4 <- kword4[!kword4 %in% kword3]
+#concatenate all into one
+psl_tweets<-c(kword1,kword2,kword3,kword4)
+
+
+write.csv(psl_tweets, "psl_tweets.csv", row.names=F)
+
+
+# remove all unnecessary charaters from the tweets
+pti_txt = gsub("(RT|via)((?:\\b\\W*@\\w+)+)", "", psl_tweets)
+# remove '@ people'
+pti_txt = gsub("@\\w+", "", pti_txt)
+# remove punctuation
+pti_txt = gsub("[[:punct:]]", "", pti_txt)
+# remove numbers
+pti_txt = gsub("[[:digit:]]", "", pti_txt)
+# remove html links
+pti_txt = gsub("http\\w+", "", pti_txt)
+# remove unnecessary spaces
+pti_txt = gsub("[ \t]{2,}", "", pti_txt)
+pti_txt = gsub("^\\s+|\\s+$", "", pti_txt)
+
+
+# convert to lowercase
+# define "tolower error handling" function
+try.error = function(x)
+{
+  # create missing value
+  y = NA
+  # tryCatch error
+  try_error = tryCatch(tolower(x),
+                       error=function(e) e)
+  # if not an error
+  if (!inherits(try_error, "error"))
+    y = tolower(x)
+  # result
+  return(y)
+}
+#lower case using try.error with sapply
+pti_txt = sapply(pti_txt, try.error)
+#remove stopwords
+pti_txt <- pti_txt[!pti_txt %in% stopwords("SMART")]
+# remove NAs in pti_txt
+pti_txt = pti_txt[!is.na(pti_txt)]
+names(pti_txt) = NULL
+
+
+
+#you can also change the algorithm here to 'voter'. Try it and see the results
+class_pol = classify_polarity(pti_txt, algorithm="bayes")
+# get polarity best fit
+polarity = class_pol[,4]
+# classify emotion
+class_emo = classify_emotion(pti_txt, algorithm="bayes", prior=1.0)
+# get emotion best fit
+emotion = class_emo[,7]
+# substitute NA's by "unknown"
+emotion[is.na(emotion)] = "unknown"
+
+
+
+#put all results into a dataframe
+pti_df = data.frame(text=pti_txt,
+                    emotion=emotion,
+                    polarity=polarity,
+                    Candidate=rep("pti",length(pti_txt)),
+                    stringsAsFactors=FALSE)
+# sort data frame
+pti_df = within(pti_df,
+                emotion <- factor(emotion,
+                                  levels=names(sort(table(emotion),decreasing=TRUE))))
+
+
+
+#thanks to Jeffrey Bean for this function!
+score.sentiment = function(sentences, pos.words, neg.words, .progress='none')
+{
+  require(plyr)
+  require(stringr)
+  scores = laply(sentences, function(sentence, pos.words, neg.words)
+  {
+    word.list = str_split(sentence, '\\s+')
+    # sometimes a list() is one level of hierarchy too much
+    words = unlist(word.list)
+    # compare our words to the dictionaries of positive & negative terms
+    pos.matches = match(words, pos.words)
+    neg.matches = match(words, neg.words)
+    # match() returns the position of the matched term or NA
+    # we just want a TRUE/FALSE:
+    pos.matches = !is.na(pos.matches)
+    neg.matches = !is.na(neg.matches)
+    # and conveniently enough, TRUE/FALSE will be treated as 1/0 by sum():
+    score = sum(pos.matches) - sum(neg.matches)
+    return(score)
+  }, pos.words, neg.words, .progress=.progress )
+  scores.df = data.frame(score=scores, text=sentences)
+  return(scores.df)
+}
+
+#load lexicons
+subjectivity <- read.csv(system.file("data/subjectivity.csv.gz",
+                                     package="sentiment"),
+                         header=F,stringsAsFactors=F)
+names(subjectivity)<-c("word","strength","polarity")
+pos.words <- read.table("Z:/Ferguson 13 march/other assignment/DS/NA246-sentiment analysis/Lexicon/Opinion/positive-words.txt", stringsAsFactors=F, skip=35)
+pos.words[,2] <- rep("subj", nrow(pos.words))
+pos.words[,3] <- rep("positive", nrow(pos.words))
+names(pos.words)<-names(subjectivity)
+neg.words <- read.table("Z:/Ferguson 13 march/other assignment/DS/NA246-sentiment analysis/Lexicon/Opinion/negative-words.txt", stringsAsFactors=F, skip=35)
+neg.words[,2] <- rep("subj", nrow(neg.words))
+neg.words[,3] <- rep("negative", nrow(neg.words))
+names(neg.words)<-names(subjectivity)
+#merge
+subjectivity <- rbind(subjectivity,pos.words,neg.words)
+
+# sentiment score
+pti = score.sentiment(pti_txt,
+                      subjectivity$word[subjectivity$polarity=="positive"],
+                      subjectivity$word[subjectivity$polarity=="negative"])
+pti$Candidate = rep("pti",nrow(pti))
+
+#******************************************************************************
+
+total_pti <- data.frame(score=sum(pti$score),
+                        Candidate=rep("pti",length(sum(pti$score))
+                                      
+                                      
+                                      #plot!
+                                      ggplot() +
+                                        geom_bar(data=total_pti,
+                                                 mapping=aes(x=Candidate, y=score),
+                                                 binwidth=10, position="dodge",stat="identity", fill="red") +
+                                        geom_bar(data=total_mqm, mapping=aes(x=Candidate, y=score),
+                                                 binwidth=10, position="dodge",stat="identity", fill="green") +
+                                        labs(x="Candidate", y="Score", title="Total Sentiment Scores Tallied")
+                                      
+                                      pti_emos = levels(factor(pti_df$emotion))
+                                      n_pti_emos = length(pti_emos)
+                                      pti.emo.docs = rep("", n_pti_emos)
+                                      
+                                      for (i in 1:n_pti_emos)
+                                      {
+                                        tmp = pti_txt[emotion == pti_emos[i]]
+                                        pti.emo.docs[i] = paste(tmp, collapse=" ")
+                                      }
+                                      
+                                      pti.emo.docs = removeWords(pti.emo.docs, stopwords("english"))
+                                      pti.corpus = Corpus(VectorSource(pti.emo.docs))
+                                      pti.tdm = TermDocumentMatrix(pti.corpus)
+                                      pti.tdm = as.matrix(pti.tdm)
+                                      colnames(pti.tdm) = pti_emos
+                                      
+#word cloud for pti  
+comparison.cloud(pti.tdm, colors = brewer.pal(n_pti_emos, "Dark2"),
+                 scale = c(3,.5), random.order = FALSE, title.size = 1.5)
